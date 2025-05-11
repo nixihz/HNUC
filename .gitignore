@@ -2,5 +2,5 @@ vendor/
 .idea/
 bin/
 device_remarks.json
-hunc.app
+hnuc.app
 .DS_Store

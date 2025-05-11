@@ -1,4 +1,4 @@
-module hunc
+module hnuc
 
 go 1.24.2
 

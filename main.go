@@ -3,6 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"io/ioutil"
+	"log/slog"
+	"net"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
@@ -15,15 +25,6 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	probing "github.com/prometheus-community/pro-bing"
-	"image/color"
-	"io/ioutil"
-	"log/slog"
-	"net"
-	"os"
-	"sort"
-	"strings"
-	"sync"
-	"time"
 )
 
 type Device struct {
@@ -239,6 +240,15 @@ func getArpTable(ifaceName string) ([]Device, error) {
 }
 
 func main() {
+	// 设置 slog 日志输出到文件
+	logFile, err := os.OpenFile("hnuc.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Println("无法创建日志文件：", err)
+	} else {
+		h := slog.NewTextHandler(logFile, nil)
+		slog.SetDefault(slog.New(h))
+	}
+
 	myApp := app.New()
 	myWindow := myApp.NewWindow("局域网设备扫描")
 
@@ -400,6 +410,7 @@ func main() {
 			devs, err := getArpTable(selectedIfaceName)
 			slog.Info("end arp")
 			if err != nil {
+				slog.Info("读取 ARP 表失败", "err", err)
 				progressChan <- scanProgress{IP: "读取 ARP 表失败", Current: 254, Total: 254}
 				close(progressChan)
 				return
