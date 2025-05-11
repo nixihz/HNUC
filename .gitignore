@@ -1,0 +1,6 @@
+vendor/
+.idea/
+bin/
+device_remarks.json
+hunc.app
+.DS_Store
