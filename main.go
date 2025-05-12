@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"bufio"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -21,9 +24,6 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 	probing "github.com/prometheus-community/pro-bing"
 )
 
@@ -150,91 +150,42 @@ type scanProgress struct {
 func getArpTable(ifaceName string) ([]Device, error) {
 	var devices []Device
 
-	// 获取本机网卡信息
-	iface, err := net.InterfaceByName(ifaceName)
+	// 执行本机 arp 命令
+	cmd := exec.Command("arp", "-a")
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
-	}
-	addrs, err := iface.Addrs()
-	if err != nil || len(addrs) == 0 {
-		return nil, fmt.Errorf("无法获取网卡地址")
-	}
-	var srcIP net.IP
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-			srcIP = ipnet.IP.To4()
-			break
-		}
-	}
-	if srcIP == nil {
-		return nil, fmt.Errorf("未找到IPv4地址")
+		return nil, fmt.Errorf("执行 arp 命令失败: %v", err)
 	}
 
-	handle, err := pcap.OpenLive(ifaceName, 65536, false, pcap.BlockForever)
-	if err != nil {
-		return nil, err
-	}
-	defer handle.Close()
-
-	// 构造 ARP 请求并发送到整个网段
-	ipMacMap := make(map[string]string)
-	srcMAC := iface.HardwareAddr
-	bcast := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	// 监听 ARP 回复
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	_ = handle.SetBPFFilter("arp")
-
-	targets := []net.IP{}
-	for i := 1; i < 255; i++ {
-		target := net.IPv4(srcIP[0], srcIP[1], srcIP[2], byte(i))
-		targets = append(targets, target)
-	}
-
-	// 发送 ARP 请求
-	for _, dstIP := range targets {
-		eth := &layers.Ethernet{
-			SrcMAC:       srcMAC,
-			DstMAC:       bcast,
-			EthernetType: layers.EthernetTypeARP,
-		}
-		arp := &layers.ARP{
-			AddrType:          layers.LinkTypeEthernet,
-			Protocol:          layers.EthernetTypeIPv4,
-			HwAddressSize:     6,
-			ProtAddressSize:   4,
-			Operation:         layers.ARPRequest,
-			SourceHwAddress:   []byte(srcMAC),
-			SourceProtAddress: []byte(srcIP),
-			DstHwAddress:      []byte{0, 0, 0, 0, 0, 0},
-			DstProtAddress:    []byte(dstIP.To4()),
-		}
-		buf := gopacket.NewSerializeBuffer()
-		opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-		_ = gopacket.SerializeLayers(buf, opts, eth, arp)
-		_ = handle.WritePacketData(buf.Bytes())
-	}
-
-	// 收集 ARP 回复，最多等待 3 秒
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		packet, err := packetSource.NextPacket()
-		if err != nil {
-			continue
-		}
-		arpLayer := packet.Layer(layers.LayerTypeARP)
-		if arpLayer != nil {
-			arp, _ := arpLayer.(*layers.ARP)
-			if arp.Operation == layers.ARPReply {
-				ip := net.IP(arp.SourceProtAddress).String()
-				mac := net.HardwareAddr(arp.SourceHwAddress).String()
-				if ip != "" && mac != "" {
-					ipMacMap[ip] = mac
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		// 兼容 macOS 和 Linux 的 arp -a 输出
+		// 例: ? (192.168.31.1) at 00:11:22:33:44:55 on en0 ifscope [ethernet]
+		// 或: 192.168.31.1    ether   00:11:22:33:44:55   C                     en0
+		var ip, mac string
+		if strings.Contains(line, " at ") && strings.Contains(line, " on ") {
+			// macOS 格式
+			parts := strings.Split(line, " ")
+			for i, p := range parts {
+				if p == "at" && i+1 < len(parts) {
+					mac = parts[i+1]
+				}
+				if strings.HasPrefix(p, "(") && strings.HasSuffix(p, ")") {
+					ip = p[1 : len(p)-1]
 				}
 			}
+		} else if fields := strings.Fields(line); len(fields) >= 3 {
+			// Linux 格式
+			ip = fields[0]
+			mac = fields[2]
 		}
-	}
-	for ip, mac := range ipMacMap {
-		devices = append(devices, Device{IP: ip, MAC: mac})
+		if ip != "" && mac != "" && (ip != "incomplete") && mac != "(incomplete)" {
+			if ip == "224.0.0.251" || ip == "239.255.255.250" {
+				continue
+			}
+			devices = append(devices, Device{IP: ip, MAC: mac})
+		}
 	}
 	return devices, nil
 }
@@ -388,7 +339,7 @@ func main() {
 	})
 	ifaceSelect.SetSelected(selectedName)
 
-	scanBtn = widget.NewButtonWithIcon("扫描局域网(10s)", theme.SearchIcon(), func() {
+	scanBtn = widget.NewButtonWithIcon("扫描局域网", theme.SearchIcon(), func() {
 		// 点击事件
 		ProgressBarInfinite = widget.NewProgressBarInfinite()
 		progressLabel = widget.NewLabel("")
